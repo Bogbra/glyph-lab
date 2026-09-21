@@ -23,6 +23,7 @@ export function TypeCanvas({
   const [canvas, setCanvas] = useState<HTMLCanvasElement | null>(null);
   const [images, setImages] = useState<Array<HTMLImageElement | null>>([]);
   const lastPaintTimeRef = useRef(0);
+  const rafAnchorRef = useRef<number | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -93,7 +94,16 @@ export function TypeCanvas({
     const hasMediaMotion = mediaSettings.mode === "sequence" && images.length > 1;
     const hasTextMotion = mediaSettings.showText && text.trim().length > 0 && settings.animation !== "static";
 
-    const loop = (time: number) => {
+    const loop = (rawTime: number) => {
+      if (rafAnchorRef.current === null) {
+        // First tick of this play run: anchor the raw rAF clock so the
+        // virtual time below continues from lastPaintTimeRef.current instead
+        // of jumping to whatever real time has passed since — otherwise
+        // resuming after a pause (or any dep change while playing) skipped
+        // the animation forward by however long the pause/gap lasted.
+        rafAnchorRef.current = rawTime - lastPaintTimeRef.current;
+      }
+      const time = rawTime - rafAnchorRef.current;
       if (time - lastPaint >= 1000 / 30) {
         draw(time);
         lastPaint = time;
@@ -105,6 +115,7 @@ export function TypeCanvas({
 
     const start = () => {
       cancelAnimationFrame(animationFrame);
+      rafAnchorRef.current = null;
       if (paused) {
         // Freeze on whatever frame was last painted instead of snapping back
         // to time 0 (which reset animated text/sequences to their starting

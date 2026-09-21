@@ -5,8 +5,9 @@ export const MAX_MEDIA_FILE_BYTES = 12 * 1024 * 1024;
 export const SUPPORTED_MEDIA_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 // The 12 MB cap above only bounds the compressed file; a highly compressed
 // image can still decode to an enormous pixel buffer. Cap the decoded size
-// too, once real dimensions are known.
-export const MAX_MEDIA_PIXELS = 30_000_000;
+// too, once real dimensions are known. Kept modest (not e.g. 30MP) because
+// up to MAX_MEDIA_ASSETS of these can be live in the tab at once.
+export const MAX_MEDIA_PIXELS = 16_000_000;
 
 export function loadMediaImage(url: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
@@ -26,16 +27,23 @@ export function loadMediaImage(url: string): Promise<HTMLImageElement> {
 }
 
 export async function loadMediaImages(assets: MediaAsset[]) {
-  // allSettled (not all): one undecodable file must not sink the whole batch
-  // and hide every other, valid image from the preview. A failed slot keeps
-  // its position (null) so the remaining images stay aligned with their
-  // asset index, thumbnail and sequence timing.
-  const results = await Promise.allSettled(assets.map((asset) => loadMediaImage(asset.url)));
-  return results.map((result) => {
-    if (result.status === "fulfilled") return result.value;
-    console.error(result.reason);
-    return null;
-  });
+  // Decode one at a time, not in parallel: with up to MAX_MEDIA_ASSETS large
+  // images, decoding all of them concurrently multiplies peak memory well
+  // past what MAX_MEDIA_PIXELS alone bounds for a single image. A failed
+  // decode doesn't stop the rest (matches addMediaFiles, which already
+  // validates decodability before an asset is kept, so this mainly guards
+  // against a file becoming unreadable later); its slot stays null so the
+  // remaining images keep their asset index, thumbnail and sequence timing.
+  const results: Array<HTMLImageElement | null> = [];
+  for (const asset of assets) {
+    try {
+      results.push(await loadMediaImage(asset.url));
+    } catch (error) {
+      console.error(error);
+      results.push(null);
+    }
+  }
+  return results;
 }
 
 function drawFittedImage(

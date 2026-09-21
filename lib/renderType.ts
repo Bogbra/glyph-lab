@@ -385,7 +385,11 @@ function animatedEffectSettings(tool: ToolName, settings: Settings, phase: numbe
 
   const amount = Math.max(0, Math.min(1, settings.animationIntensity / 100));
   const wave = Math.sin(phase);
-  const wave2 = Math.sin(phase * 0.5 + Math.PI / 3);
+  // Integer multiplier (not a sub-multiple like the original 0.5) so this
+  // term completes a whole number of cycles in exactly one base cycle —
+  // see the matching note on the jitter/morph cases in
+  // applyAnimationTransform for why that matters for GIF export loops.
+  const wave2 = Math.sin(phase * 2 + Math.PI / 3);
   const pulse = 0.5 + 0.5 * wave;
   const next = { ...settings };
 
@@ -465,9 +469,13 @@ function applyAnimationTransform(
       y = Math.sin(phase) * h * 0.055 * amount;
       break;
     case "jitter":
-      x = Math.sin(phase * 8.7) * 10 * amount;
-      y = Math.cos(phase * 11.3) * 8 * amount;
-      rotation = Math.sin(phase * 7.1) * 0.018 * amount;
+      // Integer frequencies (not the original 8.7/11.3/7.1) so this closes
+      // seamlessly after exactly one base cycle — a GIF export can then pick
+      // a loop length that matches the real animation speed instead of
+      // having to fudge the speed to hit a duration that happens to close.
+      x = Math.sin(phase * 9) * 10 * amount;
+      y = Math.cos(phase * 11) * 8 * amount;
+      rotation = Math.sin(phase * 7) * 0.018 * amount;
       break;
     case "orbit":
       x = Math.cos(phase) * w * 0.04 * amount;
@@ -482,11 +490,10 @@ function applyAnimationTransform(
     case "morph":
       // Morph primarily changes the active effect parameters, but this tiny
       // breathing transform guarantees visible temporal movement even when a
-      // user has dialled the effect itself close to a neutral value.
-      scale = 1 + Math.sin(phase * 0.5) * 0.025 * amount;
-      // Kept as a clean tenth (not 1/3) so a 10-base-cycle export phase (see
-      // TypePlayground's exportGif) closes this term exactly too.
-      rotation = Math.sin(phase * 0.3) * 0.008 * amount;
+      // user has dialled the effect itself close to a neutral value. Integer
+      // frequencies (matching wave2 above) so this closes after one cycle.
+      scale = 1 + Math.sin(phase * 2) * 0.025 * amount;
+      rotation = Math.sin(phase * 3) * 0.008 * amount;
       break;
     case "static":
       break;

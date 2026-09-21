@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { GifEncoder } from "@/lib/gif";
-import { loadMediaImages, MAX_MEDIA_ASSETS, MAX_MEDIA_FILE_BYTES, SUPPORTED_MEDIA_TYPES } from "@/lib/media";
+import { loadMediaImage, loadMediaImages, MAX_MEDIA_ASSETS, MAX_MEDIA_FILE_BYTES, SUPPORTED_MEDIA_TYPES } from "@/lib/media";
 import { renderComposition } from "@/lib/renderComposition";
 import { FONT_STACKS } from "@/lib/renderType";
 import {
@@ -268,11 +268,11 @@ export function TypePlayground() {
   const setMedia = <K extends keyof MediaSettings>(key: K, value: MediaSettings[K]) =>
     setMediaSettings((state) => ({ ...state, [key]: value }));
 
-  const addMediaFiles = (files: FileList | File[]) => {
+  const addMediaFiles = async (files: FileList | File[]) => {
     const incoming = Array.from(files);
     if (!incoming.length) return;
     const available = Math.max(0, MAX_MEDIA_ASSETS - mediaAssets.length);
-    const accepted: MediaAsset[] = [];
+    const candidates: MediaAsset[] = [];
     let rejected = 0;
 
     for (const file of incoming.slice(0, available)) {
@@ -280,20 +280,48 @@ export function TypePlayground() {
         rejected++;
         continue;
       }
-      accepted.push({
+      candidates.push({
         id: typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
         name: file.name,
         url: URL.createObjectURL(file)
       });
     }
 
-    if (!accepted.length) {
+    if (!candidates.length) {
       setMediaMessage("Use JPG, PNG or WebP up to 12 MB each.");
       return;
     }
 
-    setMediaAssets((current) => [...current, ...accepted].slice(0, MAX_MEDIA_ASSETS));
-    setMediaSettings((current) => ({ ...current, activeIndex: current.activeIndex < mediaAssets.length + accepted.length ? current.activeIndex : 0 }));
+    setMediaMessage(candidates.length === 1 ? "Checking image…" : `Checking ${candidates.length} images…`);
+
+    // Decode (and pixel-cap-check) each candidate before it ever becomes a
+    // media asset. A slot that silently fails later would still count
+    // toward the sequence's frame count and duration — better to reject it
+    // here than leave a blank gap in the playback.
+    const accepted: MediaAsset[] = [];
+    for (const candidate of candidates) {
+      try {
+        await loadMediaImage(candidate.url);
+        accepted.push(candidate);
+      } catch (error) {
+        console.error(error);
+        URL.revokeObjectURL(candidate.url);
+        rejected++;
+      }
+    }
+
+    if (!accepted.length) {
+      setMediaMessage("Those files couldn't be used — try different images.");
+      return;
+    }
+
+    let newTotalLength = 0;
+    setMediaAssets((current) => {
+      const next = [...current, ...accepted].slice(0, MAX_MEDIA_ASSETS);
+      newTotalLength = next.length;
+      return next;
+    });
+    setMediaSettings((current) => ({ ...current, activeIndex: current.activeIndex < newTotalLength ? current.activeIndex : 0 }));
     setMediaMessage(rejected || incoming.length > available ? `Added ${accepted.length}. Some files were skipped.` : `Added ${accepted.length} image${accepted.length === 1 ? "" : "s"}.`);
     window.setTimeout(() => setMediaMessage(""), 2200);
   };
@@ -450,31 +478,32 @@ export function TypePlayground() {
       const hasTextMotion = mediaSettings.showText && text.trim().length > 0 && settings.animation !== "static";
       const animated = hasMediaSequence || hasTextMotion;
       const requestedMediaDuration = hasMediaSequence ? mediaSettings.frameDurationMs * loadedImages.length : 0;
-      const totalDuration = animated ? Math.min(6000, Math.max(2000, requestedMediaDuration || 0)) : 100;
+      const targetDuration = animated ? Math.min(6000, Math.max(2000, requestedMediaDuration || 0)) : 100;
+
+      // Every animation now completes a whole cycle in exactly one base
+      // cycle (see the integer frequencies in renderType.ts), so instead of
+      // nudging animationSpeed away from what the user actually chose,
+      // snap the export's total duration to the nearest whole number of
+      // cycles at the real speed — the loop closes and the speed stays
+      // truthful to the Speed slider.
+      let totalDuration = targetDuration;
+      if (hasTextMotion) {
+        const baseCycleMs = 1000 / Math.max(0.1, settings.animationSpeed);
+        const cycles = Math.max(1, Math.round(targetDuration / baseCycleMs));
+        totalDuration = Math.min(6000, Math.max(2000, cycles * baseCycleMs));
+      }
+
       const exportMediaSettings = hasMediaSequence && requestedMediaDuration > totalDuration
         ? { ...mediaSettings, frameDurationMs: totalDuration / loadedImages.length }
         : mediaSettings;
       const frameCount = animated ? Math.min(60, Math.max(2, Math.ceil((totalDuration / 1000) * fps))) : 1;
       const frameDelay = animated ? totalDuration / frameCount : 100;
 
-      // A fixed-length export at an arbitrary animation speed rarely lands
-      // on a whole number of animation cycles, so the last frame doesn't
-      // match the first and the loop visibly jumps at the seam. jitter and
-      // morph additionally mix in non-integer frequency multipliers (see
-      // renderType.ts) that only close seamlessly every 10 base cycles.
-      // Re-derive a speed as close as possible to the user's chosen speed
-      // that still lands exactly on a cycle boundary.
-      const cycleUnit = settings.animation === "jitter" || settings.animation === "morph" ? 10 : 1;
-      const naturalCycles = (totalDuration / 1000) * Math.max(0.1, settings.animationSpeed);
-      const requiredCycles = Math.max(cycleUnit, Math.round(naturalCycles / cycleUnit) * cycleUnit);
-      const exportAnimationSpeed = (requiredCycles * 1000) / totalDuration;
-      const exportTextSettings = hasTextMotion ? { ...settings, animationSpeed: exportAnimationSpeed } : settings;
-
       const encoder = new GifEncoder(width, height, animated);
 
       for (let frame = 0; frame < frameCount; frame++) {
         const time = frame * frameDelay;
-        renderComposition(renderCtx, tool, text, cssWidth, cssHeight, exportTextSettings, exportMediaSettings, loadedImages, time);
+        renderComposition(renderCtx, tool, text, cssWidth, cssHeight, settings, exportMediaSettings, loadedImages, time);
         exportCtx.clearRect(0, 0, width, height);
         exportCtx.drawImage(renderCanvas, 0, 0, cssWidth, cssHeight, 0, 0, width, height);
         // Encoding happens frame by frame (not after collecting all of
@@ -648,7 +677,7 @@ export function TypePlayground() {
             </div>
             <Range label="Speed" value={settings.animationSpeed} min={0.25} max={2.5} step={0.05} suffix="×" onChange={(value) => set("animationSpeed", value)} />
             <Range label="Intensity" value={settings.animationIntensity} min={0} max={100} suffix="%" onChange={(value) => set("animationIntensity", value)} />
-            <p className="motionNote">GIF export renders a deterministic two-second loop at 12 fps. Reduced-motion users see a static preview.</p>
+            <p className="motionNote">GIF export loops seamlessly at the Speed above, 12 fps (10 fps with images), 2–6s. Reduced-motion users see a static preview.</p>
           </section>
 
           <section className="inspectorSection mediaSection">
