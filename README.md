@@ -28,12 +28,12 @@ Static, Breathe, Float, Jitter, Orbit, Swing, Drift and Morph.
 
 ## GIF export
 
-GIF encoding happens entirely in the browser; no user text or canvas data is uploaded to a server. The exporter uses a fixed 256-color RGB palette and renders:
+GIF encoding happens entirely in the browser; no user text or canvas data is uploaded to a server. The exporter uses a fixed 256-color RGB palette, streams frames straight into the encoder (rather than holding them all in memory), and renders:
 
-- 24 frames for animated loops;
-- 12 fps;
-- about 2 seconds per loop;
-- a maximum export width of 720 px to keep browser memory and file sizes reasonable.
+- 12 fps for text-only loops, 10 fps once images are involved;
+- up to 60 frames per loop;
+- loop length is 2–6 seconds — for animated text it snaps to whichever whole number of cycles at the current Speed setting lands closest to 2s, so the loop always closes seamlessly; for an image sequence it follows the sequence's own frame timing, clamped to the same 2–6s range;
+- the export frame is capped by total pixel area, not a fixed width — a tall or narrow composition can be wider or taller than 720 px while staying within that budget.
 
 Static motion exports as a one-frame GIF.
 
