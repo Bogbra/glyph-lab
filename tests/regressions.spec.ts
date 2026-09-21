@@ -69,7 +69,7 @@ test("GIF export duration matches the requested loop length", async ({ page }) =
   expect(totalMs).toBeLessThanOrEqual(2010);
 });
 
-test("a broken image in the upload batch does not stop GIF export of the rest", async ({ page }) => {
+test("a broken image is rejected at upload time instead of leaving a dead slot in the sequence", async ({ page }) => {
   await page.goto("/");
   const brokenFile = Buffer.from("this is not a real image, just bytes with a png-like name");
 
@@ -78,7 +78,11 @@ test("a broken image in the upload batch does not stop GIF export of the rest", 
     { name: "good.png", mimeType: "image/png", buffer: RED_PNG_1X1 }
   ]);
 
-  await expect(page.locator(".mediaThumb")).toHaveCount(2);
+  // The broken file fails to decode during upload and is dropped before it
+  // ever becomes a media asset — only the good image gets a thumbnail, so
+  // it can't leave a blank slot counted into the sequence's duration.
+  await expect(page.locator(".mediaThumb")).toHaveCount(1);
+  await expect(page.getByText(/skipped/i)).toBeVisible();
   await expect(page.getByRole("button", { name: "Export GIF" })).toBeEnabled();
 
   const downloadPromise = page.waitForEvent("download");
