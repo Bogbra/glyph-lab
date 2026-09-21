@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { loadMediaImages } from "@/lib/media";
 import { renderComposition } from "@/lib/renderComposition";
 import type { MediaAsset, MediaSettings, Settings, ToolName } from "@/lib/types";
@@ -10,16 +10,19 @@ export function TypeCanvas({
   text,
   settings,
   mediaAssets,
-  mediaSettings
+  mediaSettings,
+  paused = false
 }: {
   tool: ToolName;
   text: string;
   settings: Settings;
   mediaAssets: MediaAsset[];
   mediaSettings: MediaSettings;
+  paused?: boolean;
 }) {
   const [canvas, setCanvas] = useState<HTMLCanvasElement | null>(null);
-  const [images, setImages] = useState<HTMLImageElement[]>([]);
+  const [images, setImages] = useState<Array<HTMLImageElement | null>>([]);
+  const lastPaintTimeRef = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -67,6 +70,7 @@ export function TypeCanvas({
     let metrics = sizeCanvas();
 
     const draw = (time = 0) => {
+      lastPaintTimeRef.current = time;
       const ctx = canvas.getContext("2d", {
         willReadFrequently: tool === "dither" || tool === "pixel" || tool === "halftone"
       });
@@ -94,14 +98,19 @@ export function TypeCanvas({
         draw(time);
         lastPaint = time;
       }
-      if (!reducedMotion && (hasMediaMotion || hasTextMotion)) {
+      if (!paused && !reducedMotion && (hasMediaMotion || hasTextMotion)) {
         animationFrame = requestAnimationFrame(loop);
       }
     };
 
     const start = () => {
       cancelAnimationFrame(animationFrame);
-      if (!reducedMotion && (hasMediaMotion || hasTextMotion)) {
+      if (paused) {
+        // Freeze on whatever frame was last painted instead of snapping back
+        // to time 0 (which reset animated text/sequences to their starting
+        // pose on every pause rather than actually holding still).
+        draw(lastPaintTimeRef.current);
+      } else if (!reducedMotion && (hasMediaMotion || hasTextMotion)) {
         animationFrame = requestAnimationFrame(loop);
       } else {
         draw(0);
@@ -131,7 +140,7 @@ export function TypeCanvas({
       cancelAnimationFrame(animationFrame);
       cancelAnimationFrame(resizeFrame);
     };
-  }, [canvas, tool, text, settings, mediaSettings, images]);
+  }, [canvas, tool, text, settings, mediaSettings, images, paused]);
 
   return <canvas ref={setCanvas} className="typeCanvas" aria-label={`${tool} typography preview`} />;
 }

@@ -10,7 +10,7 @@ export function renderComposition(
   h: number,
   settings: Settings,
   mediaSettings: MediaSettings,
-  images: HTMLImageElement[],
+  images: Array<HTMLImageElement | null>,
   timeMs = 0
 ) {
   ctx.save();

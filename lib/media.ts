@@ -3,19 +3,39 @@ import type { MediaAsset, MediaSettings } from "./types";
 export const MAX_MEDIA_ASSETS = 8;
 export const MAX_MEDIA_FILE_BYTES = 12 * 1024 * 1024;
 export const SUPPORTED_MEDIA_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+// The 12 MB cap above only bounds the compressed file; a highly compressed
+// image can still decode to an enormous pixel buffer. Cap the decoded size
+// too, once real dimensions are known.
+export const MAX_MEDIA_PIXELS = 30_000_000;
 
 export function loadMediaImage(url: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const image = new Image();
     image.decoding = "async";
-    image.onload = () => resolve(image);
+    image.onload = () => {
+      const pixels = (image.naturalWidth || image.width) * (image.naturalHeight || image.height);
+      if (pixels > MAX_MEDIA_PIXELS) {
+        reject(new Error("Image dimensions are too large to process."));
+        return;
+      }
+      resolve(image);
+    };
     image.onerror = () => reject(new Error("An uploaded image could not be decoded."));
     image.src = url;
   });
 }
 
 export async function loadMediaImages(assets: MediaAsset[]) {
-  return Promise.all(assets.map((asset) => loadMediaImage(asset.url)));
+  // allSettled (not all): one undecodable file must not sink the whole batch
+  // and hide every other, valid image from the preview. A failed slot keeps
+  // its position (null) so the remaining images stay aligned with their
+  // asset index, thumbnail and sequence timing.
+  const results = await Promise.allSettled(assets.map((asset) => loadMediaImage(asset.url)));
+  return results.map((result) => {
+    if (result.status === "fulfilled") return result.value;
+    console.error(result.reason);
+    return null;
+  });
 }
 
 function drawFittedImage(
@@ -49,7 +69,7 @@ function clamp01(value: number) {
 
 export function drawMediaFrame(
   ctx: CanvasRenderingContext2D,
-  images: HTMLImageElement[],
+  images: Array<HTMLImageElement | null>,
   w: number,
   h: number,
   timeMs: number,
@@ -60,7 +80,8 @@ export function drawMediaFrame(
 
   if (settings.mode === "single" || images.length === 1) {
     const index = Math.max(0, Math.min(images.length - 1, settings.activeIndex));
-    drawFittedImage(ctx, images[index], w, h, settings.fit, 1, 0, alpha);
+    const image = images[index];
+    if (image) drawFittedImage(ctx, image, w, h, settings.fit, 1, 0, alpha);
     return;
   }
 
@@ -72,29 +93,33 @@ export function drawMediaFrame(
   const progress = (localTime % duration) / duration;
   const current = images[index];
   const next = images[nextIndex];
+  if (!current && !next) return;
+  const paint = (image: HTMLImageElement | null, zoom: number, offsetX: number, imageAlpha: number) => {
+    if (image) drawFittedImage(ctx, image, w, h, settings.fit, zoom, offsetX, imageAlpha);
+  };
 
   if (settings.transition === "cut") {
-    drawFittedImage(ctx, current, w, h, settings.fit, 1, 0, alpha);
+    paint(current, 1, 0, alpha);
     return;
   }
 
   if (settings.transition === "fade") {
     const transitionStart = 0.62;
     const mix = clamp01((progress - transitionStart) / (1 - transitionStart));
-    drawFittedImage(ctx, current, w, h, settings.fit, 1, 0, alpha * (1 - mix));
-    if (mix > 0) drawFittedImage(ctx, next, w, h, settings.fit, 1, 0, alpha * mix);
+    paint(current, 1, 0, alpha * (1 - mix));
+    if (mix > 0) paint(next, 1, 0, alpha * mix);
     return;
   }
 
   if (settings.transition === "zoom") {
     const transitionStart = 0.68;
     const mix = clamp01((progress - transitionStart) / (1 - transitionStart));
-    drawFittedImage(ctx, current, w, h, settings.fit, 1 + progress * 0.09, 0, alpha * (1 - mix * 0.82));
-    if (mix > 0) drawFittedImage(ctx, next, w, h, settings.fit, 1.12 - mix * 0.12, 0, alpha * mix);
+    paint(current, 1 + progress * 0.09, 0, alpha * (1 - mix * 0.82));
+    if (mix > 0) paint(next, 1.12 - mix * 0.12, 0, alpha * mix);
     return;
   }
 
   const eased = progress * progress * (3 - 2 * progress);
-  drawFittedImage(ctx, current, w, h, settings.fit, 1, -eased * w, alpha);
-  drawFittedImage(ctx, next, w, h, settings.fit, 1, (1 - eased) * w, alpha);
+  paint(current, 1, -eased * w, alpha);
+  paint(next, 1, (1 - eased) * w, alpha);
 }

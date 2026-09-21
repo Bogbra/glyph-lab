@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { encodeGif, type GifFrame } from "@/lib/gif";
+import { GifEncoder } from "@/lib/gif";
 import { loadMediaImages, MAX_MEDIA_ASSETS, MAX_MEDIA_FILE_BYTES, SUPPORTED_MEDIA_TYPES } from "@/lib/media";
 import { renderComposition } from "@/lib/renderComposition";
 import { FONT_STACKS } from "@/lib/renderType";
@@ -216,6 +216,10 @@ function ToolControls({
   );
 }
 
+function roundToStep(value: number, step: number) {
+  return Math.round(value / step) * step;
+}
+
 function downloadBlob(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
@@ -241,9 +245,10 @@ export function TypePlayground() {
   const stageRef = useRef<HTMLDivElement>(null);
   const mediaAssetsRef = useRef<MediaAsset[]>([]);
 
+  const preferredTheme = (): Theme => (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+
   useEffect(() => {
-    const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
-    if (prefersDark) setTheme("dark");
+    setTheme(preferredTheme());
   }, []);
 
   useEffect(() => {
@@ -298,7 +303,14 @@ export function TypePlayground() {
       const asset = current.find((item) => item.id === id);
       if (asset) URL.revokeObjectURL(asset.url);
       const next = current.filter((item) => item.id !== id);
-      setMediaSettings((settings) => ({ ...settings, activeIndex: Math.min(settings.activeIndex, Math.max(0, next.length - 1)) }));
+      setMediaSettings((settings) => ({
+        ...settings,
+        activeIndex: Math.min(settings.activeIndex, Math.max(0, next.length - 1)),
+        // The "Show text layer" switch only exists in the UI while media is
+        // present, so a false value must not survive past the last image —
+        // otherwise typed text becomes unreachable with an empty stage.
+        showText: next.length === 0 ? true : settings.showText
+      }));
       return next;
     });
   };
@@ -343,7 +355,10 @@ export function TypePlayground() {
       backgroundColor: selectedPalette.colors[0],
       foregroundColor: selectedPalette.colors[1],
       animation: selectedAnimation.id,
-      animationSpeed: 0.6 + Math.random() * 1.2,
+      // Match the Speed/Frequency sliders' own step so a randomized value
+      // doesn't display as an odd number like "1.137843…×" that the slider
+      // itself could never produce.
+      animationSpeed: roundToStep(0.6 + Math.random() * 1.2, 0.05),
       animationIntensity: 35 + Math.floor(Math.random() * 55),
       blur: Math.floor(Math.random() * 18),
       pixelSize: 3 + Math.floor(Math.random() * 10),
@@ -356,7 +371,7 @@ export function TypePlayground() {
       stretch: 70 + Math.floor(Math.random() * 60),
       repeat: 2 + Math.floor(Math.random() * 6),
       waveAmplitude: 10 + Math.floor(Math.random() * 70),
-      waveFrequency: 1 + Math.random() * 5,
+      waveFrequency: roundToStep(1 + Math.random() * 5, 0.1),
       pixelBlock: 6 + Math.floor(Math.random() * 22),
       halftoneCell: 7 + Math.floor(Math.random() * 18),
       outlineWidth: 1 + Math.floor(Math.random() * 6),
@@ -369,8 +384,13 @@ export function TypePlayground() {
   };
 
   const reset = () => {
+    // "Reset all" means all — tool, font category and theme were previously
+    // left untouched, which didn't match what the button claimed to do.
     setSettings(defaults);
     setText("");
+    setTool("dither");
+    setFontCategory("all");
+    setTheme(preferredTheme());
     clearMedia();
     setPreviewPaused(false);
   };
@@ -396,15 +416,34 @@ export function TypePlayground() {
       const loadedImages = await loadMediaImages(mediaAssets);
       const cssWidth = Math.max(1, source.clientWidth);
       const cssHeight = Math.max(1, source.clientHeight);
-      const maxWidth = mediaAssets.length ? 600 : 720;
-      const scale = Math.min(1, maxWidth / cssWidth);
-      const width = Math.max(240, Math.round(cssWidth * scale));
-      const height = Math.max(160, Math.round(cssHeight * scale));
-      const canvas = document.createElement("canvas");
-      canvas.width = width;
-      canvas.height = height;
-      const ctx = canvas.getContext("2d", { willReadFrequently: true });
-      if (!ctx) throw new Error("Canvas export is unavailable in this browser.");
+
+      // Render at the live preview's own pixel size first. Every effect
+      // parameter (blur radius, pixel size, line gap, chromatic offset, …)
+      // is tuned in absolute canvas pixels, so rendering straight at a
+      // smaller export size made the GIF look different from the preview —
+      // more/less blurred, coarser or finer pixelation, etc. Downscaling a
+      // faithful render afterward keeps it a true picture of the preview.
+      const renderCanvas = document.createElement("canvas");
+      renderCanvas.width = cssWidth;
+      renderCanvas.height = cssHeight;
+      const renderCtx = renderCanvas.getContext("2d", { willReadFrequently: true });
+      if (!renderCtx) throw new Error("Canvas export is unavailable in this browser.");
+
+      // Cap the exported frame by total pixel count, not just width, so a
+      // tall narrow stage can't produce an unbounded number of rows — each
+      // frame (and the whole animated GIF held across up to 60 of them)
+      // stays bounded regardless of the stage's aspect ratio.
+      const maxPixels = mediaAssets.length ? 600 * 450 : 720 * 540;
+      const pixelScale = Math.min(1, Math.sqrt(maxPixels / (cssWidth * cssHeight)));
+      const width = Math.max(160, Math.round(cssWidth * pixelScale));
+      const height = Math.max(120, Math.round(cssHeight * pixelScale));
+      const exportCanvas = document.createElement("canvas");
+      exportCanvas.width = width;
+      exportCanvas.height = height;
+      const exportCtx = exportCanvas.getContext("2d", { willReadFrequently: true });
+      if (!exportCtx) throw new Error("Canvas export is unavailable in this browser.");
+      exportCtx.imageSmoothingEnabled = true;
+      exportCtx.imageSmoothingQuality = "high";
 
       const fps = mediaAssets.length ? 10 : 12;
       const hasMediaSequence = mediaSettings.mode === "sequence" && loadedImages.length > 1;
@@ -417,21 +456,37 @@ export function TypePlayground() {
         : mediaSettings;
       const frameCount = animated ? Math.min(60, Math.max(2, Math.ceil((totalDuration / 1000) * fps))) : 1;
       const frameDelay = animated ? totalDuration / frameCount : 100;
-      const frames: GifFrame[] = [];
+
+      // A fixed-length export at an arbitrary animation speed rarely lands
+      // on a whole number of animation cycles, so the last frame doesn't
+      // match the first and the loop visibly jumps at the seam. jitter and
+      // morph additionally mix in non-integer frequency multipliers (see
+      // renderType.ts) that only close seamlessly every 10 base cycles.
+      // Re-derive a speed as close as possible to the user's chosen speed
+      // that still lands exactly on a cycle boundary.
+      const cycleUnit = settings.animation === "jitter" || settings.animation === "morph" ? 10 : 1;
+      const naturalCycles = (totalDuration / 1000) * Math.max(0.1, settings.animationSpeed);
+      const requiredCycles = Math.max(cycleUnit, Math.round(naturalCycles / cycleUnit) * cycleUnit);
+      const exportAnimationSpeed = (requiredCycles * 1000) / totalDuration;
+      const exportTextSettings = hasTextMotion ? { ...settings, animationSpeed: exportAnimationSpeed } : settings;
+
+      const encoder = new GifEncoder(width, height, animated);
 
       for (let frame = 0; frame < frameCount; frame++) {
         const time = frame * frameDelay;
-        renderComposition(ctx, tool, text, width, height, settings, exportMediaSettings, loadedImages, time);
-        frames.push({ image: ctx.getImageData(0, 0, width, height), delayMs: frameDelay });
+        renderComposition(renderCtx, tool, text, cssWidth, cssHeight, exportTextSettings, exportMediaSettings, loadedImages, time);
+        exportCtx.clearRect(0, 0, width, height);
+        exportCtx.drawImage(renderCanvas, 0, 0, cssWidth, cssHeight, 0, 0, width, height);
+        // Encoding happens frame by frame (not after collecting all of
+        // them), so only the current frame's pixels are ever held at once.
+        encoder.addFrame(exportCtx.getImageData(0, 0, width, height), frameDelay);
         if (frame % 4 === 0) {
           setGifStatus(`Rendering GIF ${frame + 1}/${frameCount}`);
           await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
         }
       }
 
-      setGifStatus("Encoding GIF…");
-      await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
-      const blob = encodeGif(frames, animated);
+      const blob = encoder.finish();
       const label = mediaAssets.length && !text.trim() ? "media" : `${tool}-${settings.animation}`;
       downloadBlob(blob, `glyph-lab-${label}.gif`);
       setGifStatus("GIF ready");
@@ -456,7 +511,9 @@ export function TypePlayground() {
           <span>{activeAnimation.label} · realtime type processor</span>
         </div>
         <div className="topActions">
-          <button type="button" onClick={randomize} aria-label="Shuffle settings"><span>Shuffle</span><b>↝</b></button>
+          {/* Also randomizes the text, not just the visual settings, so the
+              accessible name says "everything" rather than "settings". */}
+          <button type="button" onClick={randomize} aria-label="Shuffle everything"><span>Shuffle</span><b>↝</b></button>
           <button
             type="button"
             onClick={() => setPreviewPaused((value) => !value)}
@@ -499,9 +556,10 @@ export function TypePlayground() {
             <TypeCanvas
               tool={tool}
               text={text}
-              settings={previewPaused ? { ...settings, animation: "static" } : settings}
+              settings={settings}
               mediaAssets={mediaAssets}
-              mediaSettings={previewPaused ? { ...mediaSettings, mode: "single" } : mediaSettings}
+              mediaSettings={mediaSettings}
+              paused={previewPaused}
             />
             {!text.trim() && !mediaAssets.length && (
               <div className="emptyStageHint">
@@ -551,6 +609,7 @@ export function TypePlayground() {
                     className={settings.font === font.id ? "isSelected" : ""}
                     onClick={() => set("font", font.id)}
                     aria-pressed={settings.font === font.id}
+                    aria-label={font.label}
                   >
                     <strong style={{ fontFamily: font.stack }}>{font.sample}</strong><span>{font.label}</span>
                   </button>
@@ -623,7 +682,12 @@ export function TypePlayground() {
               <>
                 <div className="mediaThumbs" aria-label="Uploaded image sequence">
                   {mediaAssets.map((asset, index) => (
-                    <div key={asset.id} className={`mediaThumb ${mediaSettings.activeIndex === index ? "isSelected" : ""}`}>
+                    <div
+                      key={asset.id}
+                      className={`mediaThumb ${
+                        mediaSettings.mode === "single" && mediaSettings.activeIndex === index ? "isSelected" : ""
+                      }`}
+                    >
                       <button type="button" className="mediaPreview" onClick={() => setMedia("activeIndex", index)} aria-label={`Select ${asset.name}`}>
                         <img src={asset.url} alt="" />
                         <span>{String(index + 1).padStart(2, "0")}</span>

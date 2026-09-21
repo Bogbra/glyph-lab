@@ -10,6 +10,14 @@ body { font-family: Arial, Helvetica, sans-serif; }
 button, input { font: inherit; }
 button { color: inherit; }
 
+/* Baseline visible keyboard focus for every control. Elements that hide
+   their native input behind an invisible overlay (color/file pickers) can't
+   rely on this alone — see .colorWell / .mediaDropzone below. */
+:focus-visible {
+  outline: 2px solid var(--accent, #ff4a2f);
+  outline-offset: 2px;
+}
+
 .appShell {
   min-height: 100dvh;
   display: grid;
@@ -18,7 +26,9 @@ button { color: inherit; }
   --panel: #efeee8;
   --stage-ui: #deddd6;
   --fg: #11110f;
-  --soft: rgba(17, 17, 15, .48);
+  /* .48 measured ~3.2:1 against --panel, below WCAG 2.2 AA's 4.5:1 for
+     normal text; .6 lands at ~4.7:1. */
+  --soft: rgba(17, 17, 15, .6);
   --line: rgba(17, 17, 15, .22);
   --line-strong: rgba(17, 17, 15, .52);
   --accent: #ff4a2f;
@@ -146,7 +156,7 @@ button { color: inherit; }
 .textControl { display: grid; gap: 5px; margin-bottom: 14px; }
 .textControl > span, .controlHeading { text-transform: uppercase; font-size: 7px; letter-spacing: .12em; color: var(--soft); }
 .textControl input {
-  width: 100%; border: 0; border-bottom: 1px solid var(--fg); outline: none; background: transparent; color: var(--fg);
+  width: 100%; border: 0; border-bottom: 1px solid var(--fg); background: transparent; color: var(--fg);
   padding: 5px 0 9px; font-size: clamp(28px, 2.3vw, 38px); font-weight: 800; line-height: 1; letter-spacing: -.055em; text-transform: uppercase;
 }
 .controlBlock { margin: 14px 0 4px; }
@@ -343,6 +353,12 @@ button { color: inherit; }
   overflow: hidden;
   cursor: pointer;
 }
+/* The real <input type="color"> is opacity:0, so its own outline would be
+   invisible too — show the ring on the wrapper instead. */
+.colorWell:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 .colorWell::after {
   content: "+";
   position: absolute;
@@ -370,7 +386,6 @@ button { color: inherit; }
   border: 1px solid var(--line);
   background: transparent;
   color: inherit;
-  outline: none;
   font-family: "Courier New", monospace;
   font-size: 8px;
   letter-spacing: .04em;
@@ -585,6 +600,11 @@ button:disabled:hover { background: transparent !important; color: inherit !impo
 .mediaDropzone:hover,
 .mediaDropzone.isDragging { background: var(--fg); color: var(--bg); border-color: var(--fg); }
 .mediaDropzone input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+/* The file input is opacity:0, so give the visible wrapper the focus ring. */
+.mediaDropzone:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 .mediaDropzone strong { font-size: 10px; letter-spacing: .08em; }
 .mediaDropzone span { max-width: 220px; color: var(--soft); font-size: 7px; line-height: 1.4; text-transform: uppercase; letter-spacing: .08em; }
 .mediaDropzone:hover span,

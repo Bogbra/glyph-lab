@@ -1,9 +1,11 @@
-function writeUint16LE(target: number[], value: number) {
-  target.push(value & 0xff, (value >> 8) & 0xff);
+function u16le(value: number) {
+  return [value & 0xff, (value >> 8) & 0xff];
 }
 
-function writeAscii(target: number[], value: string) {
-  for (let i = 0; i < value.length; i++) target.push(value.charCodeAt(i) & 0xff);
+function ascii(value: string) {
+  const bytes = new Uint8Array(value.length);
+  for (let i = 0; i < value.length; i++) bytes[i] = value.charCodeAt(i) & 0xff;
+  return bytes;
 }
 
 function buildPalette332() {
@@ -96,61 +98,85 @@ function lzwEncode(indices: Uint8Array, minCodeSize = 8) {
   return new Uint8Array(bytes);
 }
 
-function writeSubBlocks(target: number[], data: Uint8Array) {
+function subBlocks(data: Uint8Array) {
+  const out: number[] = [];
   for (let offset = 0; offset < data.length; offset += 255) {
     const size = Math.min(255, data.length - offset);
-    target.push(size);
-    for (let i = 0; i < size; i++) target.push(data[offset + i]);
+    out.push(size);
+    for (let i = 0; i < size; i++) out.push(data[offset + i]);
   }
-  target.push(0);
+  out.push(0);
+  return Uint8Array.from(out);
 }
 
-export type GifFrame = {
-  image: ImageData;
-  delayMs: number;
-};
+/**
+ * Streaming GIF encoder: each frame is turned into its own Uint8Array chunk
+ * and handed to the caller (or buffered internally) as it is produced, so a
+ * long export never needs to hold every ImageData / encoded frame in memory
+ * at once — the caller can discard a frame's ImageData right after addFrame.
+ */
+export class GifEncoder {
+  private readonly width: number;
+  private readonly height: number;
+  private readonly parts: Uint8Array[] = [];
+  private cumulativeMs = 0;
+  private cumulativeCs = 0;
+  private frameCount = 0;
+  private finished = false;
 
-export function encodeGif(frames: GifFrame[], loop = true) {
-  if (!frames.length) throw new Error("GIF export requires at least one frame.");
-  const width = frames[0].image.width;
-  const height = frames[0].image.height;
-  if (width <= 0 || height <= 0) throw new Error("Invalid GIF dimensions.");
-  if (frames.some((frame) => frame.image.width !== width || frame.image.height !== height)) {
-    throw new Error("All GIF frames must have identical dimensions.");
+  constructor(width: number, height: number, loop = true) {
+    if (width <= 0 || height <= 0) throw new Error("Invalid GIF dimensions.");
+    this.width = width;
+    this.height = height;
+
+    const header: number[] = [];
+    header.push(...u16le(width));
+    header.push(...u16le(height));
+    header.push(0xf7, 0, 0); // global table, 8-bit color resolution, 256 entries
+    this.parts.push(ascii("GIF89a"));
+    this.parts.push(Uint8Array.from(header));
+    this.parts.push(buildPalette332());
+
+    if (loop) {
+      const netscape: number[] = [0x21, 0xff, 0x0b];
+      this.parts.push(Uint8Array.from(netscape));
+      this.parts.push(ascii("NETSCAPE2.0"));
+      this.parts.push(Uint8Array.from([0x03, 0x01, 0x00, 0x00, 0x00])); // loop forever
+    }
   }
 
-  const out: number[] = [];
-  writeAscii(out, "GIF89a");
-  writeUint16LE(out, width);
-  writeUint16LE(out, height);
-  out.push(0xf7, 0, 0); // global table, 8-bit color resolution, 256 entries
-  const palette = buildPalette332();
-  for (const byte of palette) out.push(byte);
+  addFrame(image: ImageData, delayMs: number) {
+    if (this.finished) throw new Error("Cannot add frames after finish().");
+    if (image.width !== this.width || image.height !== this.height) {
+      throw new Error("All GIF frames must have identical dimensions.");
+    }
 
-  if (loop) {
-    out.push(0x21, 0xff, 0x0b);
-    writeAscii(out, "NETSCAPE2.0");
-    out.push(0x03, 0x01, 0x00, 0x00, 0x00); // loop forever
+    // Round the running total instead of each frame's delay independently, so
+    // per-frame 1/10s truncation error doesn't compound into a GIF that runs
+    // measurably longer or shorter than the requested duration.
+    this.cumulativeMs += delayMs;
+    const nextCumulativeCs = Math.round(this.cumulativeMs / 10);
+    const delayCs = Math.max(1, nextCumulativeCs - this.cumulativeCs);
+    this.cumulativeCs = nextCumulativeCs;
+
+    const descriptor: number[] = [0x21, 0xf9, 0x04, 0x00, ...u16le(delayCs), 0x00, 0x00, 0x2c];
+    descriptor.push(...u16le(0), ...u16le(0), ...u16le(this.width), ...u16le(this.height), 0x00);
+    this.parts.push(Uint8Array.from(descriptor));
+
+    const indexed = rgbaTo332(image);
+    this.parts.push(Uint8Array.from([0x08]));
+    this.parts.push(subBlocks(lzwEncode(indexed, 8)));
+    this.frameCount++;
   }
 
-  for (const frame of frames) {
-    const delayCs = Math.max(1, Math.round(frame.delayMs / 10));
-    out.push(0x21, 0xf9, 0x04, 0x00);
-    writeUint16LE(out, delayCs);
-    out.push(0x00, 0x00);
-
-    out.push(0x2c);
-    writeUint16LE(out, 0);
-    writeUint16LE(out, 0);
-    writeUint16LE(out, width);
-    writeUint16LE(out, height);
-    out.push(0x00);
-
-    const indexed = rgbaTo332(frame.image);
-    out.push(0x08);
-    writeSubBlocks(out, lzwEncode(indexed, 8));
+  finish(): Blob {
+    if (this.finished) throw new Error("finish() already called.");
+    if (this.frameCount === 0) throw new Error("GIF export requires at least one frame.");
+    this.finished = true;
+    this.parts.push(Uint8Array.from([0x3b]));
+    // TS's DOM lib parameterizes Uint8Array<ArrayBufferLike> here while
+    // BlobPart expects the ArrayBuffer-backed form; every chunk above is a
+    // plain Uint8Array, which Blob has always accepted at runtime.
+    return new Blob(this.parts as BlobPart[], { type: "image/gif" });
   }
-
-  out.push(0x3b);
-  return new Blob([new Uint8Array(out)], { type: "image/gif" });
 }

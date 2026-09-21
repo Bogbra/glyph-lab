@@ -31,17 +31,34 @@ function clear(ctx: CanvasRenderingContext2D, w: number, h: number, settings: Se
   ctx.restore();
 }
 
-function fitFont(ctx: CanvasRenderingContext2D, text: string, w: number, settings: Settings) {
+function fitFont(ctx: CanvasRenderingContext2D, text: string, w: number, h: number, settings: Settings) {
   let size = Math.min(settings.fontSize, w * 0.3);
   ctx.font = `${settings.weight} ${size}px ${FONT_STACKS[settings.font]}`;
   const maxWidth = w * 0.86;
   const measured = ctx.measureText(text).width;
   if (measured > maxWidth && measured > 0) size *= maxWidth / measured;
-  return Math.max(32, size);
+
+  // Also fit the available height, not just width — a long word on a short
+  // canvas would otherwise still be allowed to run past the top/bottom edge.
+  const maxHeight = h * 0.6;
+  if (size > maxHeight) size = maxHeight;
+
+  // Try to keep a minimum readable size, but only use it if the text still
+  // fits at that size. A fixed floor (the old code used 32px unconditionally)
+  // can re-inflate size past what fitting the width just computed — long
+  // text on a moderately narrow canvas would run off the edge again.
+  const floor = Math.min(32, w * 0.12, h * 0.12);
+  if (size < floor) {
+    ctx.font = `${settings.weight} ${floor}px ${FONT_STACKS[settings.font]}`;
+    const measuredAtFloor = ctx.measureText(text).width;
+    if (measuredAtFloor <= maxWidth) size = floor;
+  }
+
+  return Math.max(6, size);
 }
 
-function setupText(ctx: CanvasRenderingContext2D, text: string, w: number, settings: Settings) {
-  const size = fitFont(ctx, text, w, settings);
+function setupText(ctx: CanvasRenderingContext2D, text: string, w: number, h: number, settings: Settings) {
+  const size = fitFont(ctx, text, w, h, settings);
   ctx.font = `${settings.weight} ${size}px ${FONT_STACKS[settings.font]}`;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
@@ -49,7 +66,7 @@ function setupText(ctx: CanvasRenderingContext2D, text: string, w: number, setti
 }
 
 function drawBase(ctx: CanvasRenderingContext2D, text: string, w: number, h: number, settings: Settings, alpha = 1) {
-  setupText(ctx, text, w, settings);
+  setupText(ctx, text, w, h, settings);
   ctx.fillStyle = withAlpha(settings.foregroundColor, alpha);
   ctx.fillText(text, w / 2, h / 2);
 }
@@ -77,7 +94,7 @@ function textMask(text: string, w: number, h: number, s: Settings) {
   o.fillStyle = "#000";
   o.fillRect(0, 0, w, h);
   o.fillStyle = "#fff";
-  setupText(o, text, w, s);
+  setupText(o, text, w, h, s);
   o.fillText(text, w / 2, h / 2);
   return { canvas: off, ctx: o };
 }
@@ -152,7 +169,7 @@ function renderLine(ctx: CanvasRenderingContext2D, text: string, w: number, h: n
   const textLayer = makeOffscreen(w, h);
   const textCtx = textLayer.getContext("2d");
   if (!textCtx) return;
-  setupText(textCtx, text, w, s);
+  setupText(textCtx, text, w, h, s);
   textCtx.fillStyle = "#fff";
   textCtx.fillText(text, w / 2, h / 2);
 
@@ -264,7 +281,7 @@ function renderHalftone(ctx: CanvasRenderingContext2D, text: string, w: number, 
 
 function renderOutline(ctx: CanvasRenderingContext2D, text: string, w: number, h: number, s: Settings) {
   const layers = Math.max(1, Math.round(s.outlineLayers));
-  setupText(ctx, text, w, s);
+  setupText(ctx, text, w, h, s);
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   ctx.lineJoin = "round";
@@ -283,7 +300,7 @@ function renderChromatic(ctx: CanvasRenderingContext2D, text: string, w: number,
   const offset = s.chromaticOffset;
   ctx.save();
   ctx.globalCompositeOperation = "screen";
-  setupText(ctx, text, w, s);
+  setupText(ctx, text, w, h, s);
   ctx.fillStyle = "#ff2a3d";
   ctx.fillText(text, w / 2 - offset, h / 2);
   ctx.fillStyle = "#19d7ff";
@@ -467,7 +484,9 @@ function applyAnimationTransform(
       // breathing transform guarantees visible temporal movement even when a
       // user has dialled the effect itself close to a neutral value.
       scale = 1 + Math.sin(phase * 0.5) * 0.025 * amount;
-      rotation = Math.sin(phase * 0.33) * 0.008 * amount;
+      // Kept as a clean tenth (not 1/3) so a 10-base-cycle export phase (see
+      // TypePlayground's exportGif) closes this term exactly too.
+      rotation = Math.sin(phase * 0.3) * 0.008 * amount;
       break;
     case "static":
       break;
@@ -482,6 +501,8 @@ function applyAnimationTransform(
   ctx.translate(-w / 2, -h / 2);
 }
 
+let effectLayerCache: { key: string; canvas: HTMLCanvasElement } | null = null;
+
 export function renderType(
   ctx: CanvasRenderingContext2D,
   tool: ToolName,
@@ -492,8 +513,10 @@ export function renderType(
   timeMs = 0,
   options: RenderTypeOptions = {}
 ) {
-  const safeText = text.trim();
-  if (!safeText) {
+  // Only used to decide whether there is anything to draw — the text itself
+  // is rendered untrimmed further down so leading/trailing spaces the user
+  // typed are preserved, matching what the UI and README promise.
+  if (!text.trim()) {
     if (!options.transparentBackground) clear(ctx, w, h, settings);
     return;
   }
@@ -502,13 +525,27 @@ export function renderType(
   const phase = (timeMs / 1000) * speed * Math.PI * 2;
   const frameSettings = animatedEffectSettings(tool, settings, phase);
 
-  const frame = makeOffscreen(w, h);
-  const frameCtx = frame.getContext("2d", {
-    willReadFrequently: tool === "dither" || tool === "pixel" || tool === "halftone"
-  });
-  if (!frameCtx) return;
-
-  renderStaticFrame(frameCtx, tool, safeText, w, h, frameSettings, options);
+  // Every animation except "morph" only moves/scales/rotates the finished
+  // effect layer afterward (applyAnimationTransform below) — the layer
+  // itself (frameSettings) doesn't change frame to frame. Re-running dither/
+  // pixel/halftone's getImageData scan or blur's multi-pass filter on every
+  // tick was pure waste for those; reuse the last layer when nothing that
+  // would change its pixels has changed. morph's frameSettings changes every
+  // frame (by design), so its cache key naturally never matches and it keeps
+  // re-rendering as before.
+  const cacheKey = JSON.stringify([tool, text, w, h, frameSettings, options]);
+  let frame: HTMLCanvasElement;
+  if (effectLayerCache && effectLayerCache.key === cacheKey) {
+    frame = effectLayerCache.canvas;
+  } else {
+    frame = makeOffscreen(w, h);
+    const frameCtx = frame.getContext("2d", {
+      willReadFrequently: tool === "dither" || tool === "pixel" || tool === "halftone"
+    });
+    if (!frameCtx) return;
+    renderStaticFrame(frameCtx, tool, text, w, h, frameSettings, options);
+    effectLayerCache = { key: cacheKey, canvas: frame };
+  }
 
   if (!options.transparentBackground) clear(ctx, w, h, settings);
 
