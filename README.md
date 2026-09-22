@@ -64,6 +64,7 @@ The first `npm install` generates `package-lock.json`. Commit it to the reposito
 ## Production verification
 
 ```bash
+npm run lint
 npm run typecheck
 npm run build
 npm run start
@@ -102,8 +103,3 @@ See [DEPLOYMENT.md](DEPLOYMENT.md) for the release checklist.
 ## Privacy
 
 The creative workflow runs locally in the browser. Typed text, colors and rendered frames are not transmitted anywhere by this application.
-
-## Renderer regression fixes
-
-- **Line effect:** the complete line pattern is built first and intersected with the glyph mask once, preventing repeated `source-in` operations from erasing the text.
-- **GIF export:** the GIF LZW encoder now advances code width at the decoder-compatible boundary, preventing large exported frames from truncating after the first rows.
