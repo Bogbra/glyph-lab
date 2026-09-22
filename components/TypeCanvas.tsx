@@ -3,7 +3,10 @@
 import { useEffect, useRef, useState } from "react";
 import { loadMediaImages } from "@/lib/media";
 import { renderComposition } from "@/lib/renderComposition";
+import { createEffectLayerCache } from "@/lib/renderType";
 import type { MediaAsset, MediaSettings, Settings, ToolName } from "@/lib/types";
+
+const NO_IMAGES: Array<HTMLImageElement | null> = [];
 
 export function TypeCanvas({
   tool,
@@ -21,24 +24,26 @@ export function TypeCanvas({
   paused?: boolean;
 }) {
   const [canvas, setCanvas] = useState<HTMLCanvasElement | null>(null);
-  const [images, setImages] = useState<Array<HTMLImageElement | null>>([]);
+  // Only the "has media" case needs an effect (async decode); the empty
+  // case is derived below instead of set via effect, so clearing media
+  // doesn't cost an extra render.
+  const [loadedImages, setLoadedImages] = useState<Array<HTMLImageElement | null>>([]);
+  const images = mediaAssets.length ? loadedImages : NO_IMAGES;
   const lastPaintTimeRef = useRef(0);
   const rafAnchorRef = useRef<number | null>(null);
+  const effectLayerCacheRef = useRef(createEffectLayerCache());
 
   useEffect(() => {
+    if (!mediaAssets.length) return;
     let cancelled = false;
-    if (!mediaAssets.length) {
-      setImages([]);
-      return;
-    }
 
     loadMediaImages(mediaAssets)
       .then((loaded) => {
-        if (!cancelled) setImages(loaded);
+        if (!cancelled) setLoadedImages(loaded);
       })
       .catch((error) => {
         console.error(error);
-        if (!cancelled) setImages([]);
+        if (!cancelled) setLoadedImages([]);
       });
 
     return () => {
@@ -46,6 +51,12 @@ export function TypeCanvas({
     };
   }, [mediaAssets]);
 
+  // `canvas` is held in state, not a ref, specifically so this effect can
+  // depend on it being attached (see the callback ref on the element
+  // below). sizeCanvas() below writes canvas.width/height — a real DOM
+  // element property, not React-managed data — which the immutability rule
+  // can't distinguish from mutating application state.
+  // eslint-disable-next-line react-hooks/immutability -- see comment above
   useEffect(() => {
     if (!canvas) return;
     const host = canvas.parentElement;
@@ -61,6 +72,7 @@ export function TypeCanvas({
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
       const width = Math.max(1, Math.floor(rect.width));
       const height = Math.max(1, Math.floor(rect.height));
+      // eslint-disable-next-line react-hooks/immutability -- DOM element property write, see comment above the effect
       canvas.width = Math.floor(width * dpr);
       canvas.height = Math.floor(height * dpr);
       canvas.style.width = `${width}px`;
@@ -86,7 +98,8 @@ export function TypeCanvas({
         reducedMotion ? { ...settings, animation: "static" } : settings,
         mediaSettings,
         images,
-        time
+        time,
+        effectLayerCacheRef.current
       );
     };
 

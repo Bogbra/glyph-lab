@@ -508,7 +508,16 @@ function applyAnimationTransform(
   ctx.translate(-w / 2, -h / 2);
 }
 
-let effectLayerCache: { key: string; canvas: HTMLCanvasElement } | null = null;
+export type EffectLayerCache = { current: { key: string; canvas: HTMLCanvasElement } | null };
+
+// The caller owns this (see TypeCanvas / exportGif) instead of it living as
+// module-level state: a single shared cache would thrash between unrelated
+// renderers — the live preview and a GIF export run at different canvas
+// sizes and would otherwise keep evicting each other's cached frame — and
+// would silently do the same if this component is ever instantiated twice.
+export function createEffectLayerCache(): EffectLayerCache {
+  return { current: null };
+}
 
 export function renderType(
   ctx: CanvasRenderingContext2D,
@@ -518,7 +527,8 @@ export function renderType(
   h: number,
   settings: Settings,
   timeMs = 0,
-  options: RenderTypeOptions = {}
+  options: RenderTypeOptions = {},
+  cache: EffectLayerCache = createEffectLayerCache()
 ) {
   // Only used to decide whether there is anything to draw — the text itself
   // is rendered untrimmed further down so leading/trailing spaces the user
@@ -542,8 +552,8 @@ export function renderType(
   // re-rendering as before.
   const cacheKey = JSON.stringify([tool, text, w, h, frameSettings, options]);
   let frame: HTMLCanvasElement;
-  if (effectLayerCache && effectLayerCache.key === cacheKey) {
-    frame = effectLayerCache.canvas;
+  if (cache.current && cache.current.key === cacheKey) {
+    frame = cache.current.canvas;
   } else {
     frame = makeOffscreen(w, h);
     const frameCtx = frame.getContext("2d", {
@@ -551,7 +561,7 @@ export function renderType(
     });
     if (!frameCtx) return;
     renderStaticFrame(frameCtx, tool, text, w, h, frameSettings, options);
-    effectLayerCache = { key: cacheKey, canvas: frame };
+    cache.current = { key: cacheKey, canvas: frame };
   }
 
   if (!options.transparentBackground) clear(ctx, w, h, settings);

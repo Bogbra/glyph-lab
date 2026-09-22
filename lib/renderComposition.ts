@@ -1,5 +1,5 @@
 import { drawMediaFrame } from "./media";
-import { renderType } from "./renderType";
+import { createEffectLayerCache, renderType, type EffectLayerCache } from "./renderType";
 import type { MediaSettings, Settings, ToolName } from "./types";
 
 export function renderComposition(
@@ -11,7 +11,8 @@ export function renderComposition(
   settings: Settings,
   mediaSettings: MediaSettings,
   images: Array<HTMLImageElement | null>,
-  timeMs = 0
+  timeMs = 0,
+  cache: EffectLayerCache = createEffectLayerCache()
 ) {
   ctx.save();
   ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -23,6 +24,6 @@ export function renderComposition(
   drawMediaFrame(ctx, images, w, h, timeMs, mediaSettings);
 
   if (mediaSettings.showText && text.trim()) {
-    renderType(ctx, tool, text, w, h, settings, timeMs, { transparentBackground: true });
+    renderType(ctx, tool, text, w, h, settings, timeMs, { transparentBackground: true }, cache);
   }
 }

@@ -1,9 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { GifEncoder } from "@/lib/gif";
-import { loadMediaImage, loadMediaImages, MAX_MEDIA_ASSETS, MAX_MEDIA_FILE_BYTES, SUPPORTED_MEDIA_TYPES } from "@/lib/media";
-import { renderComposition } from "@/lib/renderComposition";
+import { exportGif } from "@/lib/exportGif";
+import { loadMediaImage, MAX_MEDIA_ASSETS, MAX_MEDIA_FILE_BYTES, SUPPORTED_MEDIA_TYPES } from "@/lib/media";
 import { FONT_STACKS } from "@/lib/renderType";
 import {
   defaultMediaSettings,
@@ -247,7 +246,14 @@ export function TypePlayground() {
 
   const preferredTheme = (): Theme => (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
 
+  // Deliberately not a lazy useState initializer: matchMedia isn't
+  // available during SSR, and computing the real theme only on the client's
+  // first render (post-hydration) would mismatch the server-rendered
+  // "light" HTML. Defaulting to "light" everywhere and correcting here,
+  // after mount, avoids that hydration mismatch at the cost of one extra
+  // client-only render.
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- see comment above
     setTheme(preferredTheme());
   }, []);
 
@@ -434,88 +440,21 @@ export function TypePlayground() {
     link.click();
   };
 
-  const exportGif = async () => {
+  const handleExportGif = async () => {
     if (!canExport || gifStatus) return;
     const source = stageRef.current?.querySelector("canvas");
     if (!source) return;
 
     try {
-      setGifStatus("Preparing GIF…");
-      const loadedImages = await loadMediaImages(mediaAssets);
-      const cssWidth = Math.max(1, source.clientWidth);
-      const cssHeight = Math.max(1, source.clientHeight);
-
-      // Render at the live preview's own pixel size first. Every effect
-      // parameter (blur radius, pixel size, line gap, chromatic offset, …)
-      // is tuned in absolute canvas pixels, so rendering straight at a
-      // smaller export size made the GIF look different from the preview —
-      // more/less blurred, coarser or finer pixelation, etc. Downscaling a
-      // faithful render afterward keeps it a true picture of the preview.
-      const renderCanvas = document.createElement("canvas");
-      renderCanvas.width = cssWidth;
-      renderCanvas.height = cssHeight;
-      const renderCtx = renderCanvas.getContext("2d", { willReadFrequently: true });
-      if (!renderCtx) throw new Error("Canvas export is unavailable in this browser.");
-
-      // Cap the exported frame by total pixel count, not just width, so a
-      // tall narrow stage can't produce an unbounded number of rows — each
-      // frame (and the whole animated GIF held across up to 60 of them)
-      // stays bounded regardless of the stage's aspect ratio.
-      const maxPixels = mediaAssets.length ? 600 * 450 : 720 * 540;
-      const pixelScale = Math.min(1, Math.sqrt(maxPixels / (cssWidth * cssHeight)));
-      const width = Math.max(160, Math.round(cssWidth * pixelScale));
-      const height = Math.max(120, Math.round(cssHeight * pixelScale));
-      const exportCanvas = document.createElement("canvas");
-      exportCanvas.width = width;
-      exportCanvas.height = height;
-      const exportCtx = exportCanvas.getContext("2d", { willReadFrequently: true });
-      if (!exportCtx) throw new Error("Canvas export is unavailable in this browser.");
-      exportCtx.imageSmoothingEnabled = true;
-      exportCtx.imageSmoothingQuality = "high";
-
-      const fps = mediaAssets.length ? 10 : 12;
-      const hasMediaSequence = mediaSettings.mode === "sequence" && loadedImages.length > 1;
-      const hasTextMotion = mediaSettings.showText && text.trim().length > 0 && settings.animation !== "static";
-      const animated = hasMediaSequence || hasTextMotion;
-      const requestedMediaDuration = hasMediaSequence ? mediaSettings.frameDurationMs * loadedImages.length : 0;
-      const targetDuration = animated ? Math.min(6000, Math.max(2000, requestedMediaDuration || 0)) : 100;
-
-      // Every animation now completes a whole cycle in exactly one base
-      // cycle (see the integer frequencies in renderType.ts), so instead of
-      // nudging animationSpeed away from what the user actually chose,
-      // snap the export's total duration to the nearest whole number of
-      // cycles at the real speed — the loop closes and the speed stays
-      // truthful to the Speed slider.
-      let totalDuration = targetDuration;
-      if (hasTextMotion) {
-        const baseCycleMs = 1000 / Math.max(0.1, settings.animationSpeed);
-        const cycles = Math.max(1, Math.round(targetDuration / baseCycleMs));
-        totalDuration = Math.min(6000, Math.max(2000, cycles * baseCycleMs));
-      }
-
-      const exportMediaSettings = hasMediaSequence && requestedMediaDuration > totalDuration
-        ? { ...mediaSettings, frameDurationMs: totalDuration / loadedImages.length }
-        : mediaSettings;
-      const frameCount = animated ? Math.min(60, Math.max(2, Math.ceil((totalDuration / 1000) * fps))) : 1;
-      const frameDelay = animated ? totalDuration / frameCount : 100;
-
-      const encoder = new GifEncoder(width, height, animated);
-
-      for (let frame = 0; frame < frameCount; frame++) {
-        const time = frame * frameDelay;
-        renderComposition(renderCtx, tool, text, cssWidth, cssHeight, settings, exportMediaSettings, loadedImages, time);
-        exportCtx.clearRect(0, 0, width, height);
-        exportCtx.drawImage(renderCanvas, 0, 0, cssWidth, cssHeight, 0, 0, width, height);
-        // Encoding happens frame by frame (not after collecting all of
-        // them), so only the current frame's pixels are ever held at once.
-        encoder.addFrame(exportCtx.getImageData(0, 0, width, height), frameDelay);
-        if (frame % 4 === 0) {
-          setGifStatus(`Rendering GIF ${frame + 1}/${frameCount}`);
-          await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
-        }
-      }
-
-      const blob = encoder.finish();
+      const blob = await exportGif({
+        tool,
+        text,
+        settings,
+        mediaSettings,
+        mediaAssets,
+        sourceCanvas: source,
+        onProgress: setGifStatus
+      });
       const label = mediaAssets.length && !text.trim() ? "media" : `${tool}-${settings.animation}`;
       downloadBlob(blob, `glyph-lab-${label}.gif`);
       setGifStatus("GIF ready");
@@ -531,8 +470,11 @@ export function TypePlayground() {
     <main className={`appShell ${theme === "dark" ? "themeDark" : "themeLight"}`}>
       <header className="topbar">
         <div className="brandGroup">
-          <a className="brand" href="#workspace">GLYPH/LAB</a>
-          <span className="version">12 FX · 8 MOTION · MEDIA</span>
+          {/* The page's only h1: nothing else here was a real heading, which
+              breaks screen-reader page-structure navigation. display:contents
+              (see globals.css) keeps it visually invisible as an element. */}
+          <h1><a className="brand" href="#workspace">GLYPH/LAB</a></h1>
+          <span className="version">{tools.length} FX · {animations.length} MOTION · MEDIA</span>
         </div>
         <div className="toolStatus" aria-live="polite">
           <span>{activeTool.number}</span>
@@ -553,7 +495,7 @@ export function TypePlayground() {
           </button>
           <button type="button" onClick={() => setTheme((value) => value === "light" ? "dark" : "light")} aria-label="Toggle theme"><span>Theme</span><b>◐</b></button>
           <button type="button" className="exportAction" onClick={exportPng} disabled={!canExport} aria-label="Export PNG"><span>PNG</span><b>↓</b></button>
-          <button type="button" className="exportAction gifAction" onClick={exportGif} disabled={!canExport || Boolean(gifStatus)} aria-label="Export GIF"><span>GIF</span><b>◉</b></button>
+          <button type="button" className="exportAction gifAction" onClick={handleExportGif} disabled={!canExport || Boolean(gifStatus)} aria-label="Export GIF"><span>GIF</span><b>◉</b></button>
         </div>
       </header>
 
@@ -718,6 +660,10 @@ export function TypePlayground() {
                       }`}
                     >
                       <button type="button" className="mediaPreview" onClick={() => setMedia("activeIndex", index)} aria-label={`Select ${asset.name}`}>
+                        {/* next/image optimizes remote/static assets; these are
+                            ephemeral client-side blob: URLs with nothing to fetch
+                            or optimize, so a plain img is the right tool here. */}
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
                         <img src={asset.url} alt="" />
                         <span>{String(index + 1).padStart(2, "0")}</span>
                       </button>
@@ -823,7 +769,7 @@ export function TypePlayground() {
 
           <div className="inspectorFooter">
             <button type="button" onClick={reset}>Reset all</button>
-            <span>Text optional · multi-image GIF sequences · 12 effects · 8 motion loops · 12 typeface stacks · PNG + GIF export · no dropdowns.</span>
+            <span>Text optional · multi-image GIF sequences · {tools.length} effects · {animations.length} motion loops · {fonts.length} typeface stacks · PNG + GIF export · no dropdowns.</span>
           </div>
         </aside>
       </section>
