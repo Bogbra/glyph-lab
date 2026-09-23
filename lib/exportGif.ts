@@ -66,14 +66,22 @@ export async function exportGif({
   // Every animation now completes a whole cycle in exactly one base
   // cycle (see the integer frequencies in renderType.ts), so instead of
   // nudging animationSpeed away from what the user actually chose,
-  // snap the export's total duration to the nearest whole number of
-  // cycles at the real speed — the loop closes and the speed stays
-  // truthful to the Speed slider.
+  // snap the export's total duration to a whole number of cycles at the
+  // real speed — the loop closes and the speed stays truthful to the
+  // Speed slider. The cycle count itself must be chosen from within the
+  // 2-6s window (not rounded first and clamped after): clamping an
+  // already-rounded duration can round back down to a non-integer number
+  // of cycles — e.g. at speed 0.6 (a ~1667ms cycle), rounding to the
+  // nearest cycle gives ~1667ms, which the old code then clamped up to
+  // 2000ms, leaving 1.2 cycles and a visible jump at the loop seam.
   let totalDuration = targetDuration;
   if (hasTextMotion) {
     const baseCycleMs = 1000 / Math.max(0.1, settings.animationSpeed);
-    const cycles = Math.max(1, Math.round(targetDuration / baseCycleMs));
-    totalDuration = Math.min(6000, Math.max(2000, cycles * baseCycleMs));
+    const minCycles = Math.max(1, Math.ceil(2000 / baseCycleMs));
+    const maxCycles = Math.max(minCycles, Math.floor(6000 / baseCycleMs));
+    const naturalCycles = Math.round(targetDuration / baseCycleMs);
+    const cycles = Math.min(maxCycles, Math.max(minCycles, naturalCycles));
+    totalDuration = cycles * baseCycleMs;
   }
 
   const exportMediaSettings = hasMediaSequence && requestedMediaDuration > totalDuration

@@ -22,6 +22,34 @@ async function canvasHash(canvas: import("@playwright/test").Locator) {
   });
 }
 
+// Graphic Control Extension blocks (21 F9 04 00 <delayLo> <delayHi> 00 00)
+// carry each frame's delay in centiseconds; summing them is the real
+// played-back duration of the loop.
+function gifFrameTiming(bytes: Buffer) {
+  let totalCentiseconds = 0;
+  let frameCount = 0;
+  for (let i = 0; i < bytes.length - 7; i++) {
+    if (bytes[i] === 0x21 && bytes[i + 1] === 0xf9 && bytes[i + 2] === 0x04 && bytes[i + 3] === 0x00) {
+      totalCentiseconds += bytes[i + 4] | (bytes[i + 5] << 8);
+      frameCount++;
+    }
+  }
+  return { frameCount, totalMs: totalCentiseconds * 10 };
+}
+
+async function setRangeValue(input: import("@playwright/test").Locator, value: number) {
+  await input.evaluate((element: HTMLInputElement, v: number) => {
+    // A plain `element.value = ...` goes through React's instrumented
+    // setter, which updates its internal value tracker too — so the
+    // "input" event below would look like a no-op change and React would
+    // never call onChange. The native prototype setter bypasses that.
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!;
+    setter.call(element, String(v));
+    element.dispatchEvent(new Event("input", { bubbles: true }));
+    element.dispatchEvent(new Event("change", { bubbles: true }));
+  }, value);
+}
+
 async function renderedPixelCount(canvas: import("@playwright/test").Locator) {
   return canvas.evaluate((element: HTMLCanvasElement) => {
     const context = element.getContext("2d");
@@ -51,22 +79,31 @@ test("GIF export duration matches the requested loop length", async ({ page }) =
   expect(path).not.toBeNull();
   const bytes = await readFile(path!);
 
-  // Graphic Control Extension blocks (21 F9 04 00 <delayLo> <delayHi> 00 00)
-  // carry each frame's delay in centiseconds; summing them is the real
-  // played-back duration of the loop.
-  let totalCentiseconds = 0;
-  let frameCount = 0;
-  for (let i = 0; i < bytes.length - 7; i++) {
-    if (bytes[i] === 0x21 && bytes[i + 1] === 0xf9 && bytes[i + 2] === 0x04 && bytes[i + 3] === 0x00) {
-      totalCentiseconds += bytes[i + 4] | (bytes[i + 5] << 8);
-      frameCount++;
-    }
-  }
-
+  const { frameCount, totalMs } = gifFrameTiming(bytes);
   expect(frameCount).toBeGreaterThan(1);
-  const totalMs = totalCentiseconds * 10;
   expect(totalMs).toBeGreaterThanOrEqual(1990);
   expect(totalMs).toBeLessThanOrEqual(2010);
+});
+
+test("GIF export closes the loop seamlessly at a non-default animation speed", async ({ page }) => {
+  await page.goto("/");
+  await page.getByLabel("Your text").fill("SPEED");
+  // 0.6x lands a single cycle at ~1667ms — below the export's 2s floor, so
+  // the floor must be satisfied by extending to a whole number of cycles,
+  // not by clamping the duration after rounding to the nearest cycle (that
+  // previously left a fractional 1.2 cycles and a visible jump at the seam).
+  await setRangeValue(page.getByLabel("Speed"), 0.6);
+
+  const downloadPromise = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Export GIF" }).click();
+  const download = await downloadPromise;
+  const bytes = await readFile((await download.path())!);
+
+  const { frameCount, totalMs } = gifFrameTiming(bytes);
+  expect(frameCount).toBeGreaterThan(1);
+  const cycleMs = 1000 / 0.6;
+  const cycles = totalMs / cycleMs;
+  expect(Math.abs(cycles - Math.round(cycles))).toBeLessThan(0.02);
 });
 
 test("a broken image is rejected at upload time instead of leaving a dead slot in the sequence", async ({ page }) => {
