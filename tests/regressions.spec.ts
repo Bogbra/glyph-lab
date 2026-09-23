@@ -125,7 +125,10 @@ test("removing the last image while the text layer is hidden makes typed text re
   await expect(page.locator(".mediaThumb")).toHaveCount(0);
 
   const canvas = page.locator("canvas.typeCanvas");
-  await expect.poll(() => renderedPixelCount(canvas), { timeout: 5000 }).toBeGreaterThan(100);
+  // More steps precede this poll (upload, decode-validate, two clicks) than
+  // in similar canvas-pixel assertions elsewhere, so it's the one most
+  // likely to brush against a tight budget under CI's shared/slower runners.
+  await expect.poll(() => renderedPixelCount(canvas), { timeout: 10000 }).toBeGreaterThan(100);
 });
 
 test("long text fits within the canvas at narrow viewports", async ({ page }) => {
